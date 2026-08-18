@@ -4,5 +4,7 @@ __pycache__/
 venv/
 .pytest_cache/
 .ruff_cache/
-resultados/
+resultados/*
+!resultados/README.md
+!resultados/*_linhas_corrigidas.geojson
 *_linhas.geojson
