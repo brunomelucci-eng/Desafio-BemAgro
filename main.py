@@ -1,7 +1,17 @@
 """Gera linhas de tendência a partir de pontos georreferenciados.
 
-O processamento é feito em um CRS UTM local para que distâncias, suavização e
-classificação usem metros. A saída é sempre convertida para EPSG:4326.
+Roteiro para estudar este arquivo:
+
+1. ``read_points`` valida a entrada e ``_working_copy`` converte para UTM;
+2. ``estimate_spatial_model`` descobre direção e espaçamentos em metros;
+3. ``_local_tangent_seeds`` procura pequenos trechos confiáveis;
+4. o código tenta explicar os pontos como arcos concêntricos ou retas paralelas;
+5. se nenhum modelo rígido explicar os dados, usa a curvatura compartilhada;
+6. as funções ``*_line_geometry`` constroem as LineStrings finais;
+7. ``_line_metrics`` mede e classifica cada resultado.
+
+O processamento é feito em um CRS UTM local para que toda distância represente
+metros. Somente no final a saída é convertida novamente para EPSG:4326.
 """
 
 from __future__ import annotations
@@ -131,6 +141,8 @@ def read_points(input_path: Path) -> gpd.GeoDataFrame:
 def _working_copy(points: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Converte os pontos para a zona UTM estimada a partir de seu centroide."""
 
+    # Latitude/longitude está em graus, portanto não pode ser usada diretamente
+    # para comparar 2 m, 5 m etc. O GeoPandas escolhe a zona UTM local adequada.
     geographic = points.to_crs(4326)
     metric_crs = geographic.estimate_utm_crs()
     if metric_crs is None:
@@ -148,6 +160,9 @@ def estimate_spatial_model(
 ) -> tuple[SpatialModel, np.ndarray]:
     """Estima orientação das fileiras e espaçamentos sem limiares em graus/metres fixos."""
 
+    # ETAPA 1 — MODELO ESPACIAL GLOBAL
+    # A KDTree permite consultar vizinhos próximos sem comparar todos os pares
+    # de pontos (uma busca O(n log n), em vez de aproximadamente O(n²)).
     neighbor_count = min(31, len(xy))
     _distances, indices = tree.query(xy, k=neighbor_count)
     nearest_vectors = xy[indices[:, 1]] - xy
@@ -175,6 +190,8 @@ def estimate_spatial_model(
     half_width = max(_circular_distance(index, peak, 360) for index in lobe) * 0.5
     angle_tolerance = float(np.clip(half_width + 8.0, 15.0, 32.0))
 
+    # direction é o vetor unitário que avança sobre a fileira. normal é o mesmo
+    # vetor girado 90°, apontando de uma fileira para a vizinha.
     radians = np.radians(angle_degrees)
     direction = np.array([np.cos(radians), np.sin(radians)])
     normal = np.array([-direction[1], direction[0]])
@@ -183,6 +200,8 @@ def estimate_spatial_model(
     row_spacing_candidates: list[float] = []
     for point_index in range(len(xy)):
         vectors = xy[indices[point_index, 1:]] - xy[point_index]
+        # Produto escalar = projeção do vetor nos dois eixos locais:
+        # along mede avanço na fileira; lateral mede afastamento transversal.
         along = vectors @ direction
         lateral = np.abs(vectors @ normal)
         angles = np.degrees(np.arctan2(lateral, np.abs(along)))
@@ -262,6 +281,10 @@ def _local_tangent_seeds(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Obtém tangentes locais curtas sem permitir que um outlier crie uma trilha."""
 
+    # ETAPA 2 — PEQUENOS TRECHOS CONFIÁVEIS
+    # Uma tangente é criada por três pontos: anterior -> centro -> seguinte.
+    # Exigir passos parecidos e giro pequeno evita que um ponto aleatório dite
+    # a direção da fileira inteira.
     along = xy @ model.direction
     seed_indexes: list[int] = []
     tangents: list[np.ndarray] = []
@@ -294,6 +317,8 @@ def _local_tangent_seeds(
                 second_length = float(np.linalg.norm(second))
                 if second_length <= 1e-9:
                     continue
+                # Pela relação cos(theta)=a·b/(|a||b|), obtemos quanto a
+                # direção mudou no ponto central da tripla.
                 cosine = float(
                     np.clip(
                         np.dot(first, second) / (first_length * second_length),
@@ -306,6 +331,8 @@ def _local_tangent_seeds(
                     abs(first_length - model.point_spacing)
                     + abs(second_length - model.point_spacing)
                 ) / model.point_spacing
+                # O custo combina duas grandezas normalizadas: quina angular e
+                # diferença entre os passos observados e o passo típico.
                 score = turn / 8.0 + step_error
                 candidate = (score, int(start), int(end), turn, step_error)
                 if best is None or candidate[0] < best[0]:
@@ -332,11 +359,16 @@ def _best_lattice_phase(
 ) -> float:
     """Escolhe a fase da grade periódica ignorando a cauda de outliers."""
 
+    # Imagine marcas igualmente espaçadas numa régua. O espaçamento já é
+    # conhecido, mas ainda falta descobrir onde está a primeira marca (fase).
+    # O operador módulo mede a distância de cada ponto à marca mais próxima.
     kept_count = max(1, int(np.floor(trim_fraction * len(values))))
     best_score = float("inf")
     best_phase = 0.0
     for phase in np.linspace(0.0, spacing, 256, endpoint=False):
         residuals = np.abs((values - phase + 0.5 * spacing) % spacing - 0.5 * spacing)
+        # Descartar os 5% piores resíduos impede que poucos outliers desloquem
+        # toda a grade periódica.
         trimmed = np.partition(residuals, kept_count - 1)[:kept_count]
         score = float(np.mean(trimmed))
         if score < best_score:
@@ -355,12 +387,17 @@ def _concentric_center_candidate(
     if len(seed_indexes) < 30:
         return None
 
+    # ETAPA 3A — TESTE DO MODELO CIRCULAR
+    # Num círculo, a tangente T é perpendicular ao raio (P-C). Logo:
+    # T·(P-C)=0  ->  T·C=T·P. Cada semente fornece uma equação linear para C.
     origin = np.mean(xy, axis=0)
     seed_points = xy[seed_indexes] - origin
     targets = np.sum(tangents * seed_points, axis=1)
     keep = np.ones(len(seed_indexes), dtype=bool)
     center = np.zeros(2)
 
+    # O ajuste é repetido com MAD (desvio absoluto mediano), uma medida robusta
+    # que elimina tangentes ruins sem ser dominada por valores extremos.
     for _ in range(6):
         center = np.linalg.lstsq(tangents[keep], targets[keep], rcond=None)[0]
         errors = tangents @ center - targets
@@ -373,6 +410,8 @@ def _concentric_center_candidate(
             break
         keep = next_keep
 
+    # Se todas as tangentes tiverem quase a mesma direção, o centro do círculo
+    # ficaria indeterminado e muito distante. A SVD detecta esse caso degenerado.
     singular_values = np.linalg.svd(tangents[keep], compute_uv=False)
     if (
         len(singular_values) < 2
@@ -387,6 +426,8 @@ def _concentric_center_candidate(
     if np.count_nonzero(valid_radial) < 30:
         return None
     radial[valid_radial] /= radial_lengths[valid_radial, None]
+    # Mesmo com um centro calculável, ele só é aceito se raio e tangente forem
+    # realmente quase perpendiculares para a maioria das sementes.
     perpendicular_error = np.abs(
         np.sum(tangents[valid_radial] * radial[valid_radial], axis=1)
     )
@@ -404,6 +445,9 @@ def _fit_concentric_family(
 ) -> ConcentricFamily | None:
     """Ajusta centro, espaçamento e anéis; aceita apenas pontos na banda radial."""
 
+    # ETAPA 3B — AJUSTE DOS ANÉIS CONCÊNTRICOS
+    # Subtrair a origem reduz a magnitude das coordenadas UTM e melhora o
+    # condicionamento numérico do otimizador.
     origin = np.mean(xy, axis=0)
     initial_relative_center = initial_center - origin
     center = initial_relative_center.copy()
@@ -412,6 +456,10 @@ def _fit_concentric_family(
     phase = _best_lattice_phase(radii, spacing)
     labels = np.rint((radii - phase) / spacing).astype(int)
 
+    # Alternância semelhante ao k-means:
+    #   1) com os rótulos fixos, ajusta centro, espaçamento e fase;
+    #   2) com o modelo ajustado, recalcula o anel inteiro k de cada ponto.
+    # Para quando nenhum ponto muda de anel.
     for _ in range(8):
         previous_labels = labels.copy()
         fixed_labels = labels.copy()
@@ -429,6 +477,8 @@ def _fit_concentric_family(
             )
 
         center_margin = 3.0 * model.row_spacing
+        # soft_l1 cresce quase quadraticamente perto de zero, mas quase
+        # linearmente para erros grandes; assim, outliers têm menos influência.
         result = least_squares(
             residuals,
             np.asarray([center[0], center[1], spacing, phase]),
@@ -457,6 +507,8 @@ def _fit_concentric_family(
         if np.array_equal(labels, previous_labels):
             break
 
+    # O resíduo radial diz quanto o ponto se afastou do raio ideal de seu anel.
+    # 0,45*d mantém as bandas de anéis vizinhos separadas (cada uma < meia d).
     radial_residuals = radii - (phase + labels * spacing)
     accepted = np.abs(radial_residuals) <= 0.45 * spacing
     rows: list[tuple[int, ...]] = []
@@ -484,8 +536,11 @@ def _fit_parallel_family(
 
     if len(seed_indexes) < 3:
         return None
+    # ETAPA 3C — AJUSTE DAS FAIXAS PARALELAS
     origin = np.mean(xy, axis=0)
     centered = xy - origin
+    # O autovetor principal resume várias tangentes locais em uma única direção
+    # axial. Como T e -T representam a mesma reta, usamos T.T @ T.
     _, eigenvectors = np.linalg.eigh(tangents.T @ tangents)
     initial_direction = eigenvectors[:, -1]
     if float(initial_direction @ model.direction) < 0.0:
@@ -498,6 +553,8 @@ def _fit_parallel_family(
     labels = np.rint((transverse - phase) / spacing).astype(int)
     angle_delta = 0.0
 
+    # A alternância é a versão linear do ajuste circular: otimiza ângulo,
+    # espaçamento e fase; depois recalcula o índice inteiro da fileira.
     for _ in range(8):
         previous_labels = labels.copy()
         fixed_labels = labels.copy()
@@ -538,6 +595,8 @@ def _fit_parallel_family(
 
     direction = np.asarray([np.cos(angle), np.sin(angle)])
     normal = np.asarray([-direction[1], direction[0]])
+    # Aqui o corredor é mais estreito que no círculo. Em linhas paralelas, um
+    # desvio de 15% da entrelinha já separa claramente a trilha do ruído.
     residual = transverse - (phase + labels * spacing)
     accepted = np.abs(residual) <= 0.15 * spacing
     rows: list[tuple[int, ...]] = []
@@ -566,6 +625,9 @@ def _fit_parallel_family(
 def _connected_components(
     adjacency: dict[int, list[int]], count: int
 ) -> list[list[int]]:
+    # ETAPA 4 — FALLBACK PARA CURVAS COMPARTILHADAS
+    # Neste grafo, pontos são vértices e ligações prováveis são arestas. Uma
+    # busca em profundidade reúne todos os vértices alcançáveis em componentes.
     visited: set[int] = set()
     components: list[list[int]] = []
     for start in range(count):
@@ -593,6 +655,8 @@ def _segments_cross(
 ) -> bool:
     """Retorna True somente para uma interseção própria entre dois segmentos."""
 
+    # Primeiro teste barato: caixas envolventes que não se sobrepõem significam
+    # que os segmentos certamente não podem cruzar.
     if (
         max(first_start[0], first_end[0]) < min(second_start[0], second_end[0])
         or max(second_start[0], second_end[0]) < min(first_start[0], first_end[0])
@@ -601,6 +665,9 @@ def _segments_cross(
     ):
         return False
 
+    # O sinal do produto vetorial 2D informa de qual lado da reta está o ponto.
+    # Há cruzamento próprio quando as extremidades ficam em lados opostos nas
+    # duas comparações.
     def orientation(start: np.ndarray, end: np.ndarray, point: np.ndarray) -> float:
         return float(
             (end[0] - start[0]) * (point[1] - start[1])
@@ -621,6 +688,9 @@ def _build_initial_components(
 ) -> tuple[list[list[int]], list[tuple[int, int]]]:
     """Liga pontos com no máximo um sucessor e um antecessor."""
 
+    # Estas conexões não viram diretamente as linhas finais. Elas servem para
+    # observar como a coordenada transversal muda ao avançar e, então, estimar
+    # a curvatura comum a toda a família.
     maximum_distance = 5.0 * model.point_spacing
     candidates: list[tuple[float, int, int]] = []
 
@@ -646,6 +716,8 @@ def _build_initial_components(
         for neighbor, length, angle in zip(
             neighbor_ids[valid], lengths[valid], angles[valid], strict=True
         ):
+            # Favorece passos curtos e alinhados. Dividir pelos valores do
+            # SpatialModel torna o custo comparável em arquivos de escalas distintas.
             score = (length / model.point_spacing) * (
                 1.0 + 1.2 * (angle / model.angle_tolerance) ** 2
             )
@@ -656,6 +728,8 @@ def _build_initial_components(
     used_predecessors: set[int] = set()
     adjacency: dict[int, list[int]] = defaultdict(list)
     edges: list[tuple[int, int]] = []
+    # A seleção gulosa mantém no máximo um antecessor e um sucessor e impede
+    # arestas cruzadas, formando pequenas cadeias locais confiáveis.
     for _, start, end in sorted(candidates):
         if start in used_successors or end in used_predecessors:
             continue
@@ -682,11 +756,16 @@ def _shared_curve_residual(
 ) -> np.ndarray:
     """Remove a curvatura compartilhada, preservando o afastamento entre fileiras."""
 
+    # Modelo: transverse(s) = deslocamento_da_fileira + curva_compartilhada(s).
+    # Ao subtrair dois pontos da mesma cadeia, o deslocamento constante some.
+    # Assim é possível ajustar a curva comum sem saber previamente o id da linha.
     center = float(np.mean(along))
     scale = max(float(np.ptp(along)), 1.0)
     normalized = (along - center) / scale
     design_rows: list[list[float]] = []
     targets: list[float] = []
+    # A curva é cúbica: a*s + b*s² + c*s³. Cada aresta fornece uma equação
+    # usando a diferença das potências entre sua extremidade e seu início.
     for start, end in edges:
         design_rows.append(
             [
@@ -704,6 +783,8 @@ def _shared_curve_residual(
     target = np.asarray(targets)
     keep = np.ones(len(target), dtype=bool)
     coefficients = np.zeros(3)
+    # Reajuste robusto: estima, mede os resíduos, remove valores além de
+    # 3,5*MAD e estima novamente.
     for _ in range(4):
         coefficients = np.linalg.lstsq(design[keep], target[keep], rcond=None)[0]
         errors = target - design @ coefficients
@@ -720,6 +801,8 @@ def _shared_curve_residual(
         + coefficients[1] * normalized**2
         + coefficients[2] * normalized**3
     )
+    # Após a subtração, fileiras curvas ficam aproximadamente horizontais no
+    # sistema (along, residual), o que simplifica a detecção por densidade.
     return transverse - shared_curve
 
 
@@ -729,6 +812,8 @@ def _density_rows(
 ) -> list[tuple[list[int], float]]:
     """Localiza cristas densas e descarta cristas esparsas na entrelinha."""
 
+    # O histograma transversal funciona como uma vista de cima "comprimida" no
+    # eixo longitudinal. Fileiras densas criam picos; pontos aleatórios, não.
     bin_width = max(row_spacing / 30.0, 1e-6)
     bin_edges = np.arange(
         float(np.min(straightened)) - row_spacing,
@@ -758,6 +843,8 @@ def _density_rows(
     if not len(centers):
         return []
 
+    # Cada ponto vai para o centro de fileira mais próximo, mas só é aceito se
+    # estiver dentro do corredor de 16% da entrelinha.
     distances = np.abs(straightened[:, None] - centers[None, :])
     labels = np.argmin(distances, axis=1)
     accepted = distances[np.arange(len(straightened)), labels] <= 0.16 * row_spacing
@@ -777,6 +864,9 @@ def _parallel_line_geometry(
 ) -> np.ndarray:
     """Cria a tendência reta central da faixa, inclusive através de lacunas."""
 
+    # ETAPA 5 — CONSTRUÇÃO DAS GEOMETRIAS
+    # Uma reta é completamente definida pela direção, pelo nível transversal e
+    # pelos valores mínimo/máximo de avanço dos pontos associados.
     centered = xy[np.asarray(nodes)] - family.origin
     along = centered @ family.direction
     endpoints = np.asarray([float(np.min(along)), float(np.max(along))])
@@ -791,12 +881,15 @@ def _polar_line_geometry(
 ) -> np.ndarray:
     """Interpola em coordenadas polares para uma lacuna não virar uma corda."""
 
+    # Converter para (raio, ângulo) torna trivial ordenar pontos do mesmo arco.
     node_array = np.asarray(nodes, dtype=int)
     vectors = xy[node_array] - center
     radii = np.linalg.norm(vectors, axis=1)
     raw_angles = np.mod(np.arctan2(vectors[:, 1], vectors[:, 0]), 2.0 * np.pi)
     order = np.argsort(raw_angles)
     ordered_angles = raw_angles[order]
+    # Ângulos saltam de +pi para -pi. Começar logo depois do maior intervalo sem
+    # dados e aplicar unwrap evita percorrer a volta longa do círculo.
     circular_gaps = np.diff(np.r_[ordered_angles, ordered_angles[0] + 2.0 * np.pi])
     first = (int(np.argmax(circular_gaps)) + 1) % len(order)
     order = np.roll(order, -first)
@@ -805,6 +898,8 @@ def _polar_line_geometry(
 
     dense_angles: list[float] = []
     dense_radii: list[float] = []
+    # Uma ligação direta entre extremos distantes seria uma corda que corta o
+    # interior do círculo. Inserimos vértices no arco a cada <=0,75 passo.
     maximum_step = max(0.75 * point_spacing, 1e-6)
     for index in range(len(order) - 1):
         angle_start = float(ordered_angles[index])
@@ -848,6 +943,8 @@ def _shared_curve_line_geometry(
 ) -> np.ndarray:
     """Interpola uma fileira dentro de sua faixa retificada, sem atalhos."""
 
+    # Recuperamos a curva que havia sido retirada e interpolamos no sistema
+    # retificado. Isso fecha lacunas sem saltar para uma fileira vizinha.
     node_array = np.asarray(nodes, dtype=int)
     global_center = float(np.mean(along))
     global_scale = max(float(np.ptp(along)), 1.0)
@@ -890,6 +987,8 @@ def _shared_curve_line_geometry(
     )
     dense_normalized = (dense_along - global_center) / global_scale
     shared_curve = np.polyval(shared_coefficients, dense_normalized)
+    # O clip é uma garantia topológica: a interpolação nunca sai da faixa que
+    # pertence a esta fileira, mesmo numa lacuna longa.
     dense_residual = np.clip(
         dense_residual,
         row_center - 0.16 * model.row_spacing,
@@ -906,6 +1005,9 @@ def _line_metrics(line: LineString, row_xy: np.ndarray) -> tuple[float, str, flo
     """Calcula comprimento e classificação por desvio relativo e mudança angular."""
 
     length = float(line.length)
+    # ETAPA 6 — MÉTRICAS E CLASSIFICAÇÃO
+    # A corda liga os extremos. Quanto mais a geometria se afasta dela e muda de
+    # direção, maior a evidência de que a linha é curva.
     chord_vector = row_xy[-1] - row_xy[0]
     chord = float(np.linalg.norm(chord_vector))
     if chord <= 1e-9 or len(row_xy) < 4:
@@ -925,6 +1027,8 @@ def _line_metrics(line: LineString, row_xy: np.ndarray) -> tuple[float, str, flo
     else:
         turning_degrees = 0.0
 
+    # Sinuosidade = comprimento real / distância reta entre extremos.
+    # Uma reta ideal vale 1; valores maiores indicam caminho curvo.
     sinuosity = length / chord
     is_curve = (
         (relative_deviation >= 0.020 and turning_degrees >= 8.0)
@@ -937,6 +1041,7 @@ def _line_metrics(line: LineString, row_xy: np.ndarray) -> tuple[float, str, flo
 def generate_lines(points: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Executa o algoritmo completo e devolve linhas em EPSG:4326."""
 
+    # ORQUESTRAÇÃO DO PIPELINE
     metric_points = _working_copy(points)
     xy = np.column_stack((metric_points.geometry.x, metric_points.geometry.y))
     tree = cKDTree(xy)
@@ -944,6 +1049,10 @@ def generate_lines(points: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     seed_indexes, tangents = _local_tangent_seeds(xy, tree, model)
 
     line_inputs: list[tuple[np.ndarray, int]] = []
+    # Ordem de decisão:
+    # 1) modelo circular, quando existe centro comum confiável (amostra 4);
+    # 2) modelo paralelo, quando explica >=90% dos pontos (amostra 5);
+    # 3) fallback flexível de curvatura + densidade (amostras 1, 2 e 3).
     circular_center = _concentric_center_candidate(xy, seed_indexes, tangents)
     concentric = (
         _fit_concentric_family(xy, circular_center, model)
@@ -1001,6 +1110,7 @@ def generate_lines(points: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             "Nenhuma linha com pelo menos três pontos foi identificada."
         )
 
+    # Só agora os arrays métricos viram geometrias e atributos tabulares.
     records: list[dict[str, object]] = []
     geometries: list[LineString] = []
     for line_id, (geometry_xy, point_count) in enumerate(line_inputs, start=1):
@@ -1017,6 +1127,8 @@ def generate_lines(points: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             }
         )
 
+    # comprimento_m já foi calculado em UTM. A geometria é reprojetada para
+    # EPSG:4326 apenas para cumprir o contrato de saída do desafio.
     result = gpd.GeoDataFrame(records, geometry=geometries, crs=metric_points.crs)
     return result.to_crs(4326)
 
