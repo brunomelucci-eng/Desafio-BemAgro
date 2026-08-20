@@ -85,3 +85,23 @@ A abordagem seguiu um fluxo de **Desenvolvimento Orientado a Prompts (Prompt-Dri
 > *Atualize o `README.md` com instruÃ§Ãµes detalhadas de instalaÃ§Ã£o (`requirements.txt`), uso da CLI e resumo da validaÃ§Ã£o de todas as amostras."*
 
 **Resultado:** CÃ³digo fonte totalmente documentado com 114+ linhas de comentÃ¡rios didÃ¡ticos e `README.md` atualizado.
+
+
+---
+
+## Etapa 6: Evolução para GeoAI e Aprendizado Profundo (U-Net++)
+
+**Objetivo:** Elevar o nível do desafio para uma arquitetura moderna de Machine Learning, utilizando PyTorch e redes neurais para segmentação semântica, integradas ao pipeline geométrico original.
+
+> **Prompt Mestre:**
+> *Atue como um Machine Learning Engineer Sênior + Computer Vision Engineer + Geospatial Engineer + Software Architect Python, com experiência avançada em PyTorch, U-Net++, segmentação semântica e processamento geoespacial.*
+>
+> *O objetivo não é apenas entregar algo que funcione. Quero transformar o desafio em um projeto profissional de GeoAI / Machine Learning, demonstrando Engenharia de Software, Machine Learning, Deep Learning, arquitetura de software, e MLOps.*
+>
+> *Fluxo esperado:*
+> *1. Geração de Dados Sintéticos (rastreabilidade, robustez).*
+> *2. Dataset Geoespacial com PyTorch.*
+> *3. Arquitetura U-Net++ de segmentação (Deep Supervision).*
+> *4. Treinamento determinístico e logs via TensorBoard.*
+> *5. Inferência Híbrida: Uso da IA para filtragem semântica e o baseline geométrico para validação espacial rigorosa.*
+
