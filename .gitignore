@@ -8,3 +8,9 @@ resultados/*
 !resultados/README.md
 !resultados/*_linhas_corrigidas.geojson
 *_linhas.geojson
+
+# ML Outputs e Checkpoints
+runs/
+resultados_ml/
+dataset/
+

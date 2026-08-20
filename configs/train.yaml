@@ -1,0 +1,31 @@
+model:
+  in_channels: 3       # occupancy, density, distance
+  base_channels: 32    # filtros no encoder L0; dobra a cada nível
+  depth: 4             # níveis de downsampling (bottleneck = image_size / 2^depth)
+  deep_supervision: false  # ativar para treinamento mais rico (aumenta memória)
+  dropout_p: 0.1       # dropout nos ConvBlocks (0.0 = sem dropout)
+
+training:
+  epochs: 100
+  batch_size: 8
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  patience: 15         # épocas sem melhora antes do early stopping
+  seed: 42
+
+loss:
+  bce_weight: 1.0
+  dice_weight: 1.0
+  pos_weight: null     # peso da classe positiva no BCE (null = sem peso)
+
+data:
+  image_size: 256
+  train_samples: 10000
+  val_samples: 1000
+  line_thickness_px: 3  # espessura da máscara GT em pixels
+  num_workers: 0        # 0 = thread principal (recomendado Windows)
+
+inference:
+  threshold: 0.5        # limiar de binarização do mapa de probabilidades
+  tile_size: 256        # tamanho do tile para inferência em campos grandes
+  overlap_fraction: 0.25

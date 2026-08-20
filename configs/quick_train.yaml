@@ -1,0 +1,34 @@
+# Configuração RÁPIDA — resultado em ~5 minutos na GPU
+# Use para ver o primeiro resultado antes do treino completo.
+
+model:
+  in_channels: 3
+  base_channels: 32
+  depth: 4
+  deep_supervision: false
+  dropout_p: 0.1
+
+training:
+  epochs: 10
+  batch_size: 8
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  patience: 99
+  seed: 42
+
+loss:
+  bce_weight: 1.0
+  dice_weight: 1.0
+  pos_weight: null
+
+data:
+  image_size: 256
+  train_samples: 2000
+  val_samples: 200
+  line_thickness_px: 3
+  num_workers: 0
+
+inference:
+  threshold: 0.5
+  tile_size: 256
+  overlap_fraction: 0.25

@@ -1,0 +1,1 @@
+"""Subpacote de geometria geoespacial."""
