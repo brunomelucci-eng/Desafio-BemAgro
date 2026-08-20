@@ -13,4 +13,6 @@ resultados/*
 runs/
 resultados_ml/
 dataset/
+dataset.zip
+*.zip
 
